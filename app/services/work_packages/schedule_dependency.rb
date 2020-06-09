@@ -88,9 +88,9 @@ class WorkPackages::ScheduleDependency
 
   def load_following(work_packages)
     WorkPackage
-      .hierarchy_tree_following(work_packages)
-      .includes(parent_relation: :from,
-                follows_relations: :to)
+      .for_scheduling(work_packages)
+    #.includes(parent_relation: :from,
+    #          follows_relations: :to)
   end
 
   def find_moved(candidates)
