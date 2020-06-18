@@ -51,6 +51,21 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
       FactoryBot.create(:follows_relation, from: suc, to: origin)
     end
   end
+  let(:successor_parent) do
+    FactoryBot.create(:work_package, project: project).tap do |par|
+      FactoryBot.create(:hierarchy_relation, from: par, to: successor)
+    end
+  end
+  let(:successor_child) do
+    FactoryBot.create(:work_package, project: project).tap do |chi|
+      FactoryBot.create(:hierarchy_relation, from: successor, to: chi)
+    end
+  end
+  let(:successor_child2) do
+    FactoryBot.create(:work_package, project: project).tap do |chi|
+      FactoryBot.create(:hierarchy_relation, from: successor, to: chi)
+    end
+  end
   let(:successor_successor) do
     FactoryBot.create(:work_package, project: project).tap do |suc|
       FactoryBot.create(:follows_relation, from: suc, to: successor)
@@ -129,6 +144,84 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
       end
     end
 
+    context 'for a work package with a successor which has parent and child' do
+      let!(:existing_work_packages) { [successor, successor_child, successor_parent] }
+
+      context 'with all scheduled automatically' do
+        it 'consists of the successor, its child and parent' do
+          expect(described_class.fetch([origin]))
+            .to match_array([successor, successor_child, successor_parent])
+        end
+      end
+
+      context 'with successor scheduled manually' do
+        before do
+          successor.update_column(:schedule_manually, true)
+        end
+
+        it 'is empty' do
+          expect(described_class.fetch([origin]))
+            .to be_empty
+        end
+      end
+
+      context 'with the successor\'s parent scheduled manually' do
+        before do
+          successor_parent.update_column(:schedule_manually, true)
+        end
+
+        it 'consists of the successor and its child' do
+          expect(described_class.fetch([origin]))
+            .to match_array([successor, successor_child])
+        end
+      end
+
+      context 'with successor\'s child scheduled manually' do
+        before do
+          successor_child.update_column(:schedule_manually, true)
+        end
+
+        it 'is empty' do
+          expect(described_class.fetch([origin]))
+            .to be_empty
+        end
+      end
+    end
+
+    context 'for a work package with a successor with two children and the successor having a successor' do
+      let!(:existing_work_packages) { [successor, successor_child, successor_child2, successor_successor] }
+
+      context 'with all scheduled automatically' do
+        it 'consists of the successor, its child and parent' do
+          expect(described_class.fetch([origin]))
+            .to match_array([successor, successor_child, successor_child2, successor_successor])
+        end
+      end
+
+      context 'with one of the successor`s children scheduled manually' do
+        before do
+          successor_child2.update_column(:schedule_manually, true)
+        end
+
+        it 'is empty' do
+          expect(described_class.fetch([origin]))
+            .to match_array([successor_child, successor, successor_successor])
+        end
+      end
+
+      context 'with both of the successor`s children scheduled manually' do
+        before do
+          successor_child.update_column(:schedule_manually, true)
+          successor_child2.update_column(:schedule_manually, true)
+        end
+
+        it 'is empty' do
+          expect(described_class.fetch([origin]))
+            .to be_empty
+        end
+      end
+    end
+
     context 'for a work package with a parent and grandparent' do
       let!(:existing_work_packages) { [parent, grandparent] }
 
@@ -173,7 +266,7 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
           parent.update_column(:schedule_manually, true)
         end
 
-        it 'contains only self' do
+        it 'is empty' do
           expect(described_class.fetch([origin]))
             .to be_empty
         end

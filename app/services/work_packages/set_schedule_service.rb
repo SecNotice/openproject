@@ -80,8 +80,6 @@ class WorkPackages::SetScheduleService
     altered = []
 
     WorkPackages::ScheduleDependency.new(work_packages).each do |scheduled, dependency|
-      next if scheduled.schedule_manually?
-
       reschedule(scheduled, dependency)
 
       altered << scheduled if scheduled.changed?
