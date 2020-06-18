@@ -36,81 +36,145 @@ module WorkPackages::Scopes
         # TODO: try to get rid of this
         return [] if work_packages.empty?
 
-        values = work_packages.map { |wp| "(#{wp.id},#{wp.id},'{#{wp.id}}'::int[])" }.join(', ')
-
         sql = <<~SQL
-          WITH RECURSIVE paths(from_id, last_joined_id, path) AS (
-            SELECT * FROM (VALUES#{values}) AS t(from_id, last_joined_id, path)
-            UNION ALL
-                     SELECT
-                      CASE
-                      WHEN to_relations.to_id = paths.from_id
-                      THEN to_relations.from_id
-                      ELSE to_relations.to_id
-                      END from_id,
-                      CASE
-                      WHEN to_relations.to_id = paths.from_id
-                      THEN to_relations.to_id
-                      ELSE to_relations.from_id
-                      END last_joined_id,
-                      CASE
-                      WHEN to_relations.to_id = paths.from_id
-                      THEN array_append(path, to_relations.from_id)
-                      ELSE array_append(path, to_relations.to_id)
-                      END final_path
-                    FROM paths
-                    JOIN relations to_relations
-                    ON (to_relations.to_id = paths.from_id AND to_relations.from_id != paths.last_joined_id AND "to_relations"."relates" = 0 AND "to_relations"."duplicates" = 0 AND "to_relations"."blocks" = 0 AND "to_relations"."includes" = 0 AND "to_relations"."requires" = 0
-                      AND (to_relations.hierarchy + to_relations.relates + to_relations.duplicates + to_relations.follows + to_relations.blocks + to_relations.includes + to_relations.requires = 1))
-                      OR (to_relations.from_id = paths.from_id AND to_relations.to_id != paths.last_joined_id AND "to_relations"."follows" = 0 AND "to_relations"."relates" = 0 AND "to_relations"."duplicates" = 0 AND "to_relations"."blocks" = 0 AND "to_relations"."includes" = 0 AND "to_relations"."requires" = 0
-                      AND (to_relations.hierarchy + to_relations.relates + to_relations.duplicates + to_relations.follows + to_relations.blocks + to_relations.includes + to_relations.requires = 1))
-                    ), manually AS (
-                      SELECT from_id from paths
-                      JOIN work_packages ON work_packages.id = paths.from_id
-                      WHERE work_packages.schedule_manually = true
-                    ), manual_by_hierarchy AS (
-                      SELECT
-                        relations.from_id
-                      FROM
-                        manually
-                      LEFT JOIN relations
-                        ON manually.from_id = relations.to_id AND  "relations"."follows" = 0 AND "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
-                        AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires != 0)
-                      WHERE relations.from_id IS NOT NULL
-                    ), manual_by_path AS (
-                SELECT
-                        paths.from_id, manually.from_id manual_id
-                      FROM
-                      paths
-                      JOIN manually
-                      ON manually.from_id = any(paths.path)
-              ), leafs_in_path AS (
-                SELECT paths.from_id id
-                FROM paths
-                LEFT JOIN	relations
-                        ON paths.from_id = relations.from_id AND "relations".hierarchy = 1 AND "relations"."follows" = 0 AND "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
-                        AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires = 1)
-                WHERE relations.from_id IS NULL
-              ), automatic_in_hierarchy_and_path AS (
-                SELECT
-                      paths.from_id id, paths.path, manual_by_path.manual_id
-                    FROM
-                    paths
-                    LEFT JOIN relations
-              ON paths.from_id = relations.from_id AND relations.to_id IN (SELECT id FROM leafs_in_path) AND "relations"."follows" = 0 AND "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
-                        AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires != 0)
-              LEFT JOIN manual_by_path
-                      ON manual_by_path.from_id = relations.to_id OR (manual_by_path.from_id = paths.from_id AND manual_by_path.manual_id IS NOT NULL)
-              )
+          WITH
+            #{paths_sql(work_packages)},
+            #{manual_in_path_sql},
+            #{manual_by_hierarchy_sql},
+            #{manual_by_path_sql},
+            #{leafs_in_path_sql},
+            #{automatic_in_hierarchy_and_path_sql},
+            #{automatic_without_broken_paths_sql}
 
-              SELECT DISTINCT work_packages.*
-              FROM automatic_in_hierarchy_and_path
-              JOIN work_packages ON work_packages.id = automatic_in_hierarchy_and_path.id
-              WHERE manual_id IS NULL
-              AND work_packages.id NOT IN (#{work_packages.map(&:id).join(',')})
+          SELECT DISTINCT work_packages.*
+          FROM automatic_without_broken_paths
+          JOIN work_packages ON work_packages.id = automatic_without_broken_paths.id
+          AND work_packages.id NOT IN (#{work_packages.map(&:id).join(',')})
         SQL
 
         WorkPackage.find_by_sql(sql)
+      end
+
+      private
+
+      def paths_sql(work_packages)
+        values = work_packages.map { |wp| "(#{wp.id},#{wp.id},ARRAY[#{wp.id}])" }.join(', ')
+
+        <<~SQL
+          RECURSIVE paths(from_id, last_joined_id, path) AS (
+            SELECT * FROM (VALUES#{values}) AS t(from_id, last_joined_id, path)
+
+            UNION ALL
+
+            SELECT
+              CASE
+                WHEN relations.to_id = paths.from_id
+                THEN relations.from_id
+                ELSE relations.to_id
+              END from_id,
+              CASE
+                WHEN relations.to_id = paths.from_id
+                THEN relations.to_id
+                ELSE relations.from_id
+              END last_joined_id,
+              CASE
+                WHEN relations.to_id = paths.from_id
+                THEN array_append(path, relations.from_id)
+                ELSE array_append(path, relations.to_id)
+              END final_path
+            FROM
+              paths
+            JOIN
+              relations
+              ON (relations.to_id = paths.from_id AND relations.from_id != paths.last_joined_id AND "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
+                AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires = 1))
+              OR (relations.from_id = paths.from_id AND relations.to_id != paths.last_joined_id AND "relations"."follows" = 0 AND "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
+                AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires = 1))
+          )
+        SQL
+      end
+
+      def manual_in_path_sql
+        <<~SQL
+          manually AS (
+            SELECT from_id from paths
+            JOIN work_packages ON work_packages.id = paths.from_id
+            WHERE work_packages.schedule_manually = true
+          )
+        SQL
+      end
+
+      def manual_by_hierarchy_sql
+        <<~SQL
+          manual_by_hierarchy AS (
+            SELECT
+              relations.from_id
+            FROM
+              manually
+            LEFT JOIN relations
+              ON manually.from_id = relations.to_id AND  "relations"."follows" = 0 AND "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
+              AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires != 0)
+            WHERE relations.from_id IS NOT NULL
+          )
+        SQL
+      end
+
+      def manual_by_path_sql
+        <<~SQL
+          manual_by_path AS (
+            SELECT
+              paths.from_id, manually.from_id manual_id
+            FROM
+              paths
+            JOIN manually
+            ON manually.from_id = any(paths.path)
+          )
+        SQL
+      end
+
+      def leafs_in_path_sql
+        <<~SQL
+          leafs_in_path AS (
+            SELECT paths.from_id id
+            FROM paths
+            LEFT JOIN
+            relations
+            ON paths.from_id = relations.from_id AND "relations".hierarchy = 1 AND "relations"."follows" = 0 AND "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
+            AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires = 1)
+            WHERE relations.from_id IS NULL
+          )
+        SQL
+      end
+
+      def automatic_in_hierarchy_and_path_sql
+        <<~SQL
+          automatic_in_hierarchy_and_path AS (
+            SELECT
+              paths.from_id id,
+              paths.path,
+              manual_by_path.manual_id
+            FROM
+            paths
+            LEFT JOIN relations
+            ON paths.from_id = relations.from_id AND relations.to_id IN (SELECT id FROM leafs_in_path) AND "relations"."follows" = 0 AND "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
+            AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires != 0)
+            LEFT JOIN manual_by_path
+            ON manual_by_path.from_id = relations.to_id OR (manual_by_path.from_id = paths.from_id AND manual_by_path.manual_id IS NOT NULL)
+          )
+        SQL
+      end
+
+      #  Removes all paths that are broken in the sense that one node of them is no longer in the set of automatically
+      #  scheduled work nodes.
+      #  That can happen when they are removed by the manually scheduling being promoted up the hierarchy.
+      def automatic_without_broken_paths_sql
+        <<~SQL
+          automatic_without_broken_paths AS (
+            SELECT *
+            FROM automatic_in_hierarchy_and_path
+            WHERE path <@ (SELECT array_agg(id) FROM automatic_in_hierarchy_and_path WHERE manual_id IS NULL)
+          )
+        SQL
       end
     end
   end
