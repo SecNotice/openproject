@@ -51,6 +51,11 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
       FactoryBot.create(:follows_relation, from: suc, to: origin)
     end
   end
+  let(:successor2) do
+    FactoryBot.create(:work_package, project: project).tap do |suc|
+      FactoryBot.create(:follows_relation, from: suc, to: origin)
+    end
+  end
   let(:successor_parent) do
     FactoryBot.create(:work_package, project: project).tap do |par|
       FactoryBot.create(:hierarchy_relation, from: par, to: successor)
@@ -173,6 +178,54 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
         it 'consists of the successor and its child' do
           expect(described_class.fetch([origin]))
             .to match_array([successor, successor_child])
+        end
+      end
+
+      context 'with successor\'s child scheduled manually' do
+        before do
+          successor_child.update_column(:schedule_manually, true)
+        end
+
+        it 'is empty' do
+          expect(described_class.fetch([origin]))
+            .to be_empty
+        end
+      end
+    end
+
+    context 'for a work package with a successor which has parent and the parent has a follows relationship itself' do
+      let!(:existing_work_packages) { [successor, successor_parent] }
+
+      before do
+        FactoryBot.create(:follows_relation, from: successor_parent, to: origin)
+      end
+
+      context 'with all scheduled automatically' do
+        it 'consists of the successor, its child and parent' do
+          expect(described_class.fetch([origin]))
+            .to match_array([successor, successor_parent])
+        end
+      end
+
+      context 'with successor scheduled manually' do
+        before do
+          successor.update_column(:schedule_manually, true)
+        end
+
+        it 'still includes the parent (as it is a successor itself)' do
+          expect(described_class.fetch([origin]))
+            .to match_array [successor_parent]
+        end
+      end
+
+      context 'with the successor\'s parent scheduled manually' do
+        before do
+          successor_parent.update_column(:schedule_manually, true)
+        end
+
+        it 'consists of the successor' do
+          expect(described_class.fetch([origin]))
+            .to match_array([successor])
         end
       end
 

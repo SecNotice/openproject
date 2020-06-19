@@ -32,6 +32,46 @@
 module WorkPackages::Scopes
   class ForScheduling
     class << self
+      # Fetches all work packages that need to be evaluated for eventual rescheduling after a related (i.e. follows/precedes
+      # and hierarchy) work package is modified or created.
+      # TODO: Check if this can be changed to only one work package
+      # @param work_packages WorkPackage[] A set of work packages for which the set of related work packages that might
+      # be subject to reschedule is fetched.
+      #
+      # The SQL relies on CTEs which, after constructing the set of all potential work_packages then filter down the
+      # work packages to the actually affected work packages.
+      #
+      # The first CTE works recursively to fetch all work packages related to the provided work package and the path of
+      # intermediate work packages. The work packages can either be connected via a follows relationship, a hierarchy relationship
+      # or a combination of both.
+      # E.g. in a graph of
+      #   A  <- follows - B <- hierarchy (C is parent of B) - C <- follows D
+      #
+      # D would also be subject to reschedule
+      #
+      # At least for hierarchical relationships, we need to follow the relationship in both directions.
+      # E.g. in a graph of
+      #   A  <- follows - B - hierarchy (B is parent of C) -> C <- follows D
+      #
+      # D would also be subject to reschedule
+      #
+      # That possible switch in direction means that we cannot simply get all possibly affected work packages by one
+      # SQL query which the DAG implementation would have allowed us to do otherwise.
+      # Additionally, we need to get the whole paths (with all intermediate work packages included) which would be possible
+      # with DAG but as we need to rely on a recursive approach already so we do not need to complicate the SQL statement any
+      # further. Fetching the whole path (at least in one direction) relying on DAG would be faster though so we might revisit this
+      # if any performance shortcomings are identified.
+      # The first CTE returns all work packages with their path so reusing the example above, the result would be
+      #   id      |   path
+      #   A       | {A}
+      #   B       | {A,B}
+      #   C       | {A,B,C}
+      #   D       | {A,B,C,D}
+      # If the graph where to contain multiple paths to one node work package, because of multiple follows relationship
+      # to the same hierarchical tree, the work package would be returned twice.
+      #
+      #
+      #
       def fetch(work_packages)
         # TODO: try to get rid of this
         return [] if work_packages.empty?
