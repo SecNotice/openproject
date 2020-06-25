@@ -212,9 +212,9 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
           successor.update_column(:schedule_manually, true)
         end
 
-        it 'still includes the parent (as it is a successor itself)' do
+        it 'is empty (hierarchy over relationships' do
           expect(described_class.fetch([origin]))
-            .to match_array [successor_parent]
+            .to be_empty
         end
       end
 
@@ -224,17 +224,6 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
         end
 
         it 'consists of the successor' do
-          expect(described_class.fetch([origin]))
-            .to match_array([successor])
-        end
-      end
-
-      context 'with successor\'s child scheduled manually' do
-        before do
-          successor_child.update_column(:schedule_manually, true)
-        end
-
-        it 'is empty' do
           expect(described_class.fetch([origin]))
             .to be_empty
         end
