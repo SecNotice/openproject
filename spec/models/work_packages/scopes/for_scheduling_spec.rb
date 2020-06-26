@@ -225,6 +225,18 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
 
         it 'consists of the successor' do
           expect(described_class.fetch([origin]))
+            .to match_array([successor])
+        end
+      end
+
+      context 'both scheduled manually' do
+        before do
+          successor.update_column(:schedule_manually, true)
+          successor_parent.update_column(:schedule_manually, true)
+        end
+
+        it 'is empty' do
+          expect(described_class.fetch([origin]))
             .to be_empty
         end
       end
