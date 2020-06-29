@@ -193,6 +193,43 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
       end
     end
 
+    context 'for a work package with a successor which has parent and child and a successor of its own which is also a child of parent' do
+      let!(:existing_work_packages) { [successor, successor_child, successor_parent, successor_successor] }
+
+      before do
+        FactoryBot.create(:hierarchy_relation, from: successor_parent, to: successor_successor)
+      end
+
+      context 'with all scheduled automatically' do
+        it 'consists of the successor, its child and parent and the successor successor' do
+          expect(described_class.fetch([origin]))
+            .to match_array([successor, successor_child, successor_parent, successor_successor])
+        end
+      end
+
+      context 'with successor parent scheduled manually' do
+        before do
+          successor_parent.update_column(:schedule_manually, true)
+        end
+
+        it 'consists of the successor, its child and successor successor' do
+          expect(described_class.fetch([origin]))
+            .to match_array([successor, successor_child, successor_successor])
+        end
+      end
+
+      context 'with successor\'s child scheduled manually' do
+        before do
+          successor_child.update_column(:schedule_manually, true)
+        end
+
+        it 'is empty' do
+          expect(described_class.fetch([origin]))
+            .to be_empty
+        end
+      end
+    end
+
     context 'for a work package with a successor which has parent and the parent has a follows relationship itself' do
       let!(:existing_work_packages) { [successor, successor_parent] }
 
@@ -212,7 +249,7 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
           successor.update_column(:schedule_manually, true)
         end
 
-        it 'is empty (hierarchy over relationships' do
+        it 'is empty (hierarchy over relationships)' do
           expect(described_class.fetch([origin]))
             .to be_empty
         end

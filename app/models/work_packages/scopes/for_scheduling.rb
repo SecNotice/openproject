@@ -147,23 +147,27 @@ module WorkPackages::Scopes
       # not be noticeable.
       #
       # The CTE starts from the provided work package and for that returns:
-      #   * the id
-      #   * the id again (explained below)
+      #   * the id of the work package
       #   * the path to that work package which is again the id but this time as a PostgreSQL array
+      #   * again, a path, same as above but referred to as the path_root (explained below)
       #   * the information, that the starting work package is not manually scheduled.
       # Whether the starting work package is manually scheduled or in fact automatically scheduled does make no
       # difference but we need those four columns later on.
       #
-      # The for each recursive step, we return all work packages that are directly related to our current set of work
+      # For each recursive step, we return all work packages that are directly related to our current set of work
       # packages by a hierarchy (up or down) or follows relationship (only successors). For each such work package
       # the statement returns:
-      #   * id of the work package.
-      #   * the id of the work package the current relationship originates from. This is the id of the work package we
-      #     extended the path from (joined with). This information prevents an infinite loop that would otherwise be
-      #     possible as we go down as well as up the hierarchy chain.
+      #   * id of the work package that is currently at the end of a path.
       #   * the path to the added work package. This is the path of the work package the statement extended the path
       #     from (joined with) with the added work package appended.
-      #   * the information whether the added work package is automatically or manually scheduled.
+      #   * the path_root which is the path up to the first work package that is within the current work package
+      #     hierarchy. Whenever a new hierarchy is reached (indicated by joining a follow relationship), a new root
+      #     path is created. If the hierarchy is kept, the root_path is taken from the recursive step before.
+      #     The root_path is later on used to identify all work packages within the result set that are within
+      #     the same hierarchy and that might need to be removed because of manual scheduling bubbling up the
+      #     hierarchy tree. Therefore, follow relationships constructed between members of the same hierarchy are
+      #     no problem as well.
+      #   * the flag indicating whether the added work package is automatically or manually scheduled.
       #
       # Paths whose ending work package is marked to be manually scheduled are not joined with any more.
       #
@@ -172,36 +176,31 @@ module WorkPackages::Scopes
       #  * The current paths all end in manually scheduled work packages
       # Both conditions can also stop the recursion together.
       def paths_sql(work_packages)
-        values = work_packages.map { |wp| "(#{wp.id},#{wp.id},ARRAY[#{wp.id}], false,ARRAY[#{wp.id}])" }.join(', ')
+        values = work_packages.map { |wp| "(#{wp.id},ARRAY[#{wp.id}], ARRAY[#{wp.id}], false)" }.join(', ')
 
         <<~SQL
-          clean_paths (from_id, last_joined_id, path, manually) AS (
-            SELECT * FROM (VALUES#{values}) AS t(from_id, last_joined_id, path, manually, root_path)
+          clean_paths (id, path, root_path, manually) AS (
+            SELECT * FROM (VALUES#{values}) AS t(id, path, root_path, manually)
 
             UNION ALL
 
             SELECT
               CASE
-                WHEN relations.to_id = clean_paths.from_id
+                WHEN relations.to_id = clean_paths.id
                 THEN relations.from_id
                 ELSE relations.to_id
-              END from_id,
+              END id,
               CASE
-                WHEN relations.to_id = clean_paths.from_id
-                THEN relations.to_id
-                ELSE relations.from_id
-              END last_joined_id,
-              CASE
-                WHEN relations.to_id = clean_paths.from_id
+                WHEN relations.to_id = clean_paths.id
                 THEN array_append(path, relations.from_id)
                 ELSE array_append(path, relations.to_id)
-              END final_path,
-              work_packages.schedule_manually,
+              END path,
               CASE
-                WHEN relations.to_id = clean_paths.from_id AND relations.follows = 1
+                WHEN relations.to_id = clean_paths.id AND relations.follows = 1
                 THEN array_append(path, relations.from_id)
                 ELSE clean_paths.root_path
-              END root_path
+              END root_path,
+              work_packages.schedule_manually manually
             FROM
               clean_paths
             JOIN
@@ -209,11 +208,11 @@ module WorkPackages::Scopes
               ON NOT clean_paths.manually
               AND (#{relations_condition_sql})
               AND
-                ((relations.to_id = clean_paths.from_id AND relations.from_id != clean_paths.last_joined_id)
-                OR (relations.from_id = clean_paths.from_id AND relations.to_id != clean_paths.last_joined_id AND relations.follows = 0))
+                ((relations.to_id = clean_paths.id AND NOT relations.from_id = any(clean_paths.path))
+                OR (relations.from_id = clean_paths.id AND NOT relations.to_id = any(clean_paths.path) AND relations.follows = 0))
             LEFT JOIN work_packages
               ON (CASE
-                WHEN relations.to_id = clean_paths.from_id
+                WHEN relations.to_id = clean_paths.id
                 THEN relations.from_id
                 ELSE relations.to_id
                 END) = work_packages.id
@@ -221,80 +220,110 @@ module WorkPackages::Scopes
         SQL
       end
 
-      # TODO: Evaluate whether this can be replaced by always returning the root_path whenever a follows relationship
-      # is used in the recursive CET.
-      # Returns all paths identified by the first recursive CTE and adds their path_roots to the column list.
-      # A path_root here is to be understood to be the paths up until a hierarchy tree is entered (via a follows
-      # relationship).
+      # Filters a set of paths (as returned by the recursive path constructing CTE above) to only contain
+      # work packages (and their paths) that are truly automatically scheduled.
+      # Even though a work package is flagged to be automatically scheduled, a work package can in fact be manually scheduled
+      # nonetheless if:
+      # * all of its paths towards their leafs have at least one manually scheduled work package in them.
       #
-      # In the graph of
+      # As the recursive CTE above terminates a paths once a manually scheduled work package is identified,
+      # those manually scheduled work packages are leafs for the sake of the set inserted into this query but might
+      # very well have children outside of the set.
+      #
+      # Identifying all leafs (for the sake of the set) is complicated by the possibility of having multiple
+      # follow relationships spanning into the same hierarchy tree. E.g. in a graph of
       #
       #                  C
       #                  |
       #               hierarchy
       #                  |
       #                  v
-      #   A <- follows - B <- follows E
+      #   A <- follows - B
+      #   ^              |
+      #   |            hierarchy
+      #   |              |
+      #   |              v
+      #   |              D (manually)
+      #   |              |
+      #   |            hierarchy
+      #   |              |
+      #   |              v
+      #    -- follows  - E
+      #
+      # D is excluded directly. But B and C also need to be considered manually scheduled as their descendant D is
+      # scheduled manually. But E (which is the actual leaf of that hierarchy) is reached via a different follows
+      # relationship.
+      #
+      # Please not that when D has an automatically scheduled sibling F:
+      #
+      #                  C
       #                  |
       #               hierarchy
       #                  |
       #                  v
-      #                  D
+      #   A <- follows - B - hierarchy -
+      #   ^              |              |
+      #   |            hierarchy        |
+      #   |              |              |
+      #   |              v              v
+      #   |              D (manually)   F
+      #   |              |
+      #   |            hierarchy
+      #   |              |
+      #   |              v
+      #    -- follows  - E
       #
-      # The path_root for B, C and D will be {A,B} and for E it will be {A,B,E}.
+      # Neither B nor C are considered manually scheduled any more.
       #
-      # TODO: if this statement is to be kept, document in detail
-      def path_roots_sql
-        <<~SQL
-          path_roots AS (
-            SELECT
-              DISTINCT ON(paths.from_id, CASE WHEN relations.from_id = paths.from_id THEN to_id WHEN relations.to_id = paths.from_id THEN relations.from_id ELSE paths.from_id END)
-              paths.from_id id,
-              paths.path,
-              paths.path[1:CASE WHEN relations.from_id = paths.from_id THEN array_position(paths.path, to_id) WHEN relations.to_id = paths.from_id THEN array_position(paths.path, relations.from_id) ELSE array_position(paths.path, paths.from_id) END] root_path,
-              manually
-            FROM clean_paths paths
-            LEFT JOIN relations
-            ON (relations.from_id = paths.from_id AND "relations"."follows" = 0 AND "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
-                  AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires >= 1)
-                AND relations.to_id = any(paths.path)
-                )
-                OR ((relations.to_id = paths.from_id AND "relations"."follows" = 0 AND "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
-                  AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires >= 1))
-                 AND relations.from_id = any(paths.path))
-            ORDER BY paths.from_id, CASE WHEN relations.from_id = paths.from_id THEN to_id WHEN relations.to_id = paths.from_id THEN relations.from_id ELSE paths.from_id END ASC
-          )
-        SQL
-      end
-
+      # The query works by joining the paths with itself and with the relations first to identify all paths (calculated by
+      # the CTE before) that lead to descendants of a work package. Here, the root_path is considered to avoid mixing
+      # individual follows relationships jumps.
+      # Next, the paths are joined again to identify those, that have no longer paths.
+      # The result are all paths that lead to descendants of a work packages identified in the path that have no longer paths
+      # which, within the set, are the leafs. Of those, only the paths are returned that do not lead to a manually scheduled
+      # work package.
+      # This step also removes all work packages that are scheduled manually directly.
       def paths_without_manual_hierarchy_sql
         <<~SQL
           paths_without_manual_hierarchy AS (
             SELECT
-              paths.from_id id,
+              paths.id,
               paths.path
             FROM
               clean_paths paths
             LEFT JOIN
               relations
             ON
-              relations.from_id = paths.from_id AND "relations"."follows" = 0 AND (#{relations_condition_sql(transitive: true)})
+              relations.from_id = paths.id AND "relations"."follows" = 0 AND (#{relations_condition_sql(transitive: true)})
             LEFT JOIN
               clean_paths to_paths
             ON
-              relations.to_id = to_paths.from_id AND to_paths.root_path = paths.root_path
+              relations.to_id = to_paths.id AND to_paths.root_path = paths.root_path
             LEFT JOIN
               clean_paths longer_paths
             ON
               longer_paths.path[1:array_length(longer_paths.path, 1) - 1] = to_paths.path
               AND to_paths.root_path = longer_paths.root_path
               AND longer_paths.path <> paths.path
-            WHERE longer_paths.from_id IS NULL
+            WHERE longer_paths.id IS NULL
             AND NOT (paths.manually OR COALESCE(to_paths.manually, false))
           )
         SQL
       end
 
+      # Returns all paths that do not include intermediary hops (work packages) that are not within the set of paths
+      # themselves.
+      # This serves as a second filter after work packages scheduled manually by transition are removed from the set.
+      # E.g in a graph of
+      #                                    A  <- follows - B  <- follows C
+      #                                                    |
+      #                                                hierarchy
+      #                                                    v
+      #                                                    D (manually)
+      #
+      # The recursive CTE will return A, B, C and D, with D flagged as manually scheduled. The first filter will then remove
+      # D and B from the set. Now, there is no longer a connection between A and C. So the query below removes C from the
+      # result as well.
       def paths_without_gaps_sql
         <<~SQL
           eligible_paths_without_gaps AS (
