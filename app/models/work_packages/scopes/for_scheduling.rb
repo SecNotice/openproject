@@ -116,7 +116,6 @@ module WorkPackages::Scopes
           WITH
             RECURSIVE
             #{paths_sql(work_packages)},
-            #{path_roots_sql},
             #{paths_without_manual_hierarchy_sql},
             #{paths_without_gaps_sql}
 
@@ -173,11 +172,11 @@ module WorkPackages::Scopes
       #  * The current paths all end in manually scheduled work packages
       # Both conditions can also stop the recursion together.
       def paths_sql(work_packages)
-        values = work_packages.map { |wp| "(#{wp.id},#{wp.id},ARRAY[#{wp.id}], false)" }.join(', ')
+        values = work_packages.map { |wp| "(#{wp.id},#{wp.id},ARRAY[#{wp.id}], false,ARRAY[#{wp.id}])" }.join(', ')
 
         <<~SQL
           clean_paths (from_id, last_joined_id, path, manually) AS (
-            SELECT * FROM (VALUES#{values}) AS t(from_id, last_joined_id, path, manually)
+            SELECT * FROM (VALUES#{values}) AS t(from_id, last_joined_id, path, manually, root_path)
 
             UNION ALL
 
@@ -197,7 +196,12 @@ module WorkPackages::Scopes
                 THEN array_append(path, relations.from_id)
                 ELSE array_append(path, relations.to_id)
               END final_path,
-              work_packages.schedule_manually
+              work_packages.schedule_manually,
+              CASE
+                WHEN relations.to_id = clean_paths.from_id AND relations.follows = 1
+                THEN array_append(path, relations.from_id)
+                ELSE clean_paths.root_path
+              END root_path
             FROM
               clean_paths
             JOIN
@@ -267,25 +271,25 @@ module WorkPackages::Scopes
         <<~SQL
           paths_without_manual_hierarchy AS (
             SELECT
-              paths.id,
+              paths.from_id id,
               paths.path
             FROM
-              path_roots paths
+              clean_paths paths
             LEFT JOIN
               relations
             ON
-              relations.from_id = paths.id AND "relations"."follows" = 0 AND (#{relations_condition_sql(transitive: true)})
+              relations.from_id = paths.from_id AND "relations"."follows" = 0 AND (#{relations_condition_sql(transitive: true)})
             LEFT JOIN
-              path_roots to_paths
+              clean_paths to_paths
             ON
-              relations.to_id = to_paths.id AND to_paths.root_path = paths.root_path
+              relations.to_id = to_paths.from_id AND to_paths.root_path = paths.root_path
             LEFT JOIN
-              path_roots longer_paths
+              clean_paths longer_paths
             ON
               longer_paths.path[1:array_length(longer_paths.path, 1) - 1] = to_paths.path
               AND to_paths.root_path = longer_paths.root_path
               AND longer_paths.path <> paths.path
-            WHERE longer_paths.id IS NULL
+            WHERE longer_paths.from_id IS NULL
             AND NOT (paths.manually OR COALESCE(to_paths.manually, false))
           )
         SQL
@@ -304,7 +308,7 @@ module WorkPackages::Scopes
         SQL
       end
 
-      def relations_condition_sql(transitive: true)
+      def relations_condition_sql(transitive: false)
         <<~SQL
           "relations"."relates" = 0 AND "relations"."duplicates" = 0 AND "relations"."blocks" = 0 AND "relations"."includes" = 0 AND "relations"."requires" = 0
             AND (relations.hierarchy + relations.relates + relations.duplicates + relations.follows + relations.blocks + relations.includes + relations.requires #{transitive ? '>' : ''}= 1)
