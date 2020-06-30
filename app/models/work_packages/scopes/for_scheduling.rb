@@ -119,14 +119,12 @@ module WorkPackages::Scopes
             #{paths_without_manual_hierarchy_sql},
             #{paths_without_gaps_sql}
 
-            SELECT DISTINCT(work_packages.*)
-            FROM eligible_paths_without_gaps
-            JOIN work_packages
-            ON work_packages.id = eligible_paths_without_gaps.id
-            WHERE work_packages.id NOT IN (#{work_packages.map(&:id).join(', ')})
+            SELECT id FROM eligible_paths_without_gaps
         SQL
 
-        WorkPackage.find_by_sql(sql)
+        WorkPackage
+          .where("id IN (#{sql})")
+          .where.not(id: work_packages)
       end
 
       private

@@ -104,6 +104,11 @@ describe WorkPackages::Scopes::ForScheduling, 'allowed scope' do
   let(:existing_work_packages) { [] }
 
   describe '.fetch' do
+    it 'is a AR scope' do
+      expect(described_class.fetch([origin]))
+        .to be_a ActiveRecord::Relation
+    end
+
     context 'for a work package with a predecessor' do
       let!(:existing_work_packages) { [predecessor] }
 
