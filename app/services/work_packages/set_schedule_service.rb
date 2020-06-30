@@ -74,8 +74,8 @@ class WorkPackages::SetScheduleService
   # are first all loaded, and then sorted by their need to be scheduled before one another:
   # - predecessors are scheduled before their successors
   # - children/descendants are scheduled before their parents/ancestors
-  # Whenever a work package is scheduled manually, it's dates are left unchanged which might also affect
-  # the work packages that would in turn be affected by it (e.g. its ancestors and followers).
+  # Manually scheduled work packages are not encountered at this point as they are filtered out when fetching the
+  # work packages eligible for rescheduling.
   def schedule_following
     altered = []
 
